@@ -57,10 +57,16 @@ impl<'a> fmt::Display for Display<'a> {
                 Chunk::Package => {
                     let pkg = format!("{} v{}", self.package.name, self.package.version);
                     if let Some(deb) = &self.package.debinfo {
+                        let oudated_info = if deb.outdated {
+                            format!(" {}", "(outdated)".yellow())
+                        } else {
+                            "".to_string()
+                        };
+
                         if deb.in_unstable {
-                            write!(fmt, "{} (in debian)", pkg.green())?;
+                            write!(fmt, "{} (in debian) {}", pkg.green(), oudated_info)?;
                         } else if deb.in_new {
-                            write!(fmt, "{} (in debian NEW queue)", pkg.blue())?;
+                            write!(fmt, "{} (in debian NEW queue) {}", pkg.blue(), oudated_info)?;
                         } else if deb.outdated {
                             write!(fmt, "{} (outdated)", pkg.yellow())?;
                         } else {

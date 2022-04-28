@@ -1,4 +1,4 @@
-use crate::db::Connection;
+use crate::db::{Connection, SearchResult};
 use crate::errors::*;
 use crate::graph::Graph;
 use cargo_metadata::{Package, PackageId, Source};
@@ -61,10 +61,20 @@ fn run_task(db: &mut Connection, pkg: Pkg) -> Result<DebianInfo> {
         outdated: false,
     };
 
-    if db.search(&pkg.name, &pkg.version.to_string()).unwrap() {
-        deb.in_unstable = true;
-    } else if db.search_new(&pkg.name, &pkg.version.to_string()).unwrap() {
-        deb.in_new = true;
+    match db.search(&pkg.name, &pkg.version.to_string())? {
+        SearchResult::Found => deb.in_unstable = true,
+        SearchResult::FoundOutdated => {
+            deb.in_unstable = true;
+            deb.outdated = true;
+        }
+        SearchResult::NotFound => match db.search_new(&pkg.name, &pkg.version.to_string())? {
+            SearchResult::Found => deb.in_new = true,
+            SearchResult::FoundOutdated => {
+                deb.in_new = true;
+                deb.outdated = true;
+            }
+            SearchResult::NotFound => {}
+        },
     }
 
     Ok(deb)

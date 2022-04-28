@@ -9,10 +9,17 @@ use std::time::{Duration, SystemTime};
 const POSTGRES: &str = "postgresql://udd-mirror:udd-mirror@udd-mirror.debian.net/udd";
 const CACHE_EXPIRE: Duration = Duration::from_secs(90 * 60);
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum SearchResult {
+    Found,
+    FoundOutdated,
+    NotFound,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
     pub from: SystemTime,
-    pub found: bool,
+    pub found: SearchResult,
 }
 
 // TODO: also use this for outdated check(?)
@@ -64,7 +71,7 @@ impl Connection {
         target: &str,
         package: &str,
         version: &str,
-    ) -> Result<Option<bool>, Error> {
+    ) -> Result<Option<SearchResult>, Error> {
         let path = self.cache_path(target, package, version);
 
         if !path.exists() {
@@ -72,13 +79,20 @@ impl Connection {
         }
 
         let buf = fs::read(path)?;
-        let cache: CacheEntry = serde_json::from_slice(&buf)?;
-
-        if SystemTime::now().duration_since(cache.from)? > CACHE_EXPIRE {
-            Ok(None)
-        } else {
-            Ok(Some(cache.found))
+        let res: Result<CacheEntry, _> = serde_json::from_slice(&buf);
+        if let Ok(cache) = res {
+            if SystemTime::now().duration_since(cache.from)? > CACHE_EXPIRE {
+                return Ok(None);
+            } else {
+                return Ok(Some(cache.found));
+            }
         }
+
+        // cache entry invalid
+        // can happen when the format change or because of corruption
+        let path = self.cache_path(target, package, version);
+        fs::remove_file(path)?;
+        Ok(None)
     }
 
     fn write_cache(
@@ -86,7 +100,7 @@ impl Connection {
         target: &str,
         package: &str,
         version: &str,
-        found: bool,
+        found: SearchResult,
     ) -> Result<(), Error> {
         let cache = CacheEntry {
             from: SystemTime::now(),
@@ -97,7 +111,7 @@ impl Connection {
         Ok(())
     }
 
-    pub fn search(&mut self, package: &str, version: &str) -> Result<bool, Error> {
+    pub fn search(&mut self, package: &str, version: &str) -> Result<SearchResult, Error> {
         if let Some(found) = self.check_cache("sid", package, version)? {
             return Ok(found);
         }
@@ -105,7 +119,7 @@ impl Connection {
         // config.shell().status("Querying", format!("sid: {}", package))?;
         info!("Querying -> sid: {}", package);
         let found = self.search_generic(
-            "SELECT version::text FROM sources WHERE source=$1 AND release='sid';",
+            "SELECT max(version)::text FROM sources WHERE source=$1 AND release='sid';",
             package,
             version,
         )?;
@@ -114,7 +128,7 @@ impl Connection {
         Ok(found)
     }
 
-    pub fn search_new(&mut self, package: &str, version: &str) -> Result<bool, Error> {
+    pub fn search_new(&mut self, package: &str, version: &str) -> Result<SearchResult, Error> {
         if let Some(found) = self.check_cache("new", package, version)? {
             return Ok(found);
         }
@@ -122,7 +136,7 @@ impl Connection {
         // config.shell().status("Querying", format!("new: {}", package))?;
         info!("Querying -> new: {}", package);
         let found = self.search_generic(
-            "SELECT version::text FROM new_sources WHERE source=$1;",
+            "SELECT max(version)::text FROM new_sources WHERE source=$1;",
             package,
             version,
         )?;
@@ -136,25 +150,28 @@ impl Connection {
         query: &str,
         package: &str,
         version: &str,
-    ) -> Result<bool, Error> {
+    ) -> Result<SearchResult, Error> {
         let package = package.replace("_", "-");
-        let rows = self.sock.query(query, &[&format!("rust-{}", package)])?;
-
-        for row in &rows {
-            let debversion: String = row.get(0);
+        debug!("pouet {}", package);
+        if let Ok(row) = self.sock.query_one(query, &[&format!("rust-{}", package)]) {
+            let opt: Option<String> = row.get(0);
+            if opt.is_none() {
+                return Ok(SearchResult::NotFound);
+            }
+            let debversion = opt.unwrap();
 
             let debversion = match debversion.find('-') {
                 Some(idx) => debversion.split_at(idx).0,
                 _ => &debversion,
             };
 
-            // println!("{:?} ({:?}) => {:?}", debversion, version, is_compatible(debversion, version)?);
-
             if is_compatible(debversion, version)? {
-                return Ok(true);
+                return Ok(SearchResult::Found);
+            } else {
+                return Ok(SearchResult::FoundOutdated);
             }
         }
 
-        Ok(false)
+        Ok(SearchResult::NotFound)
     }
 }
